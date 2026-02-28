@@ -91,6 +91,7 @@ class VoiceCallRequest(BaseModel):
 
 
 class VoiceCallResponse(BaseModel):
-    contact_id: str
+    conversation_id: str
+    patient_id: str
     status: str = "initiated"
     message: str = ""
