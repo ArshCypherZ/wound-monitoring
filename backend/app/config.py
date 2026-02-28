@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = ""
     elevenlabs_agent_id: str = ""
 
+    sns_alert_topic_arn: str = ""
+
     debug: bool = True
     cors_origins: str = "http://localhost:5173"
 

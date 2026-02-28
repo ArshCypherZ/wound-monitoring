@@ -15,6 +15,7 @@ from app.services.dynamodb import (
     get_patient,
     delete_assessment,
 )
+from app.services.sns import publish_urgency_alert
 from app.utils.helpers import days_since
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,20 @@ async def upload_and_assess(
         logger.error("YOLO detection error: %s", str(e))
         raise HTTPException(status_code=503, detail="Wound detection service unavailable")
 
-    # 5. Send to Bedrock for assessment
+    # 5. Gather previous assessment scores for trend analysis
+    previous_scores = []
+    try:
+        past_assessments = get_assessments_by_patient(patient_id)
+        for past in past_assessments[:5]:  # 5 most recent, already sorted newest-first
+            previous_scores.append({
+                "date": past.get("created_at", ""),
+                "healing_score": float(past.get("healing_score", 0)),
+                "days_post_op": int(past.get("days_post_op", 0)),
+            })
+    except ClientError:
+        logger.warning("Could not fetch previous assessments for trend context — continuing without")
+
+    # 6. Send to Bedrock for assessment
     assessment_image = (
         yolo_result.get("cropped_image_bytes", file_bytes)
         if yolo_result and yolo_result.get("has_wound")
@@ -102,14 +116,14 @@ async def upload_and_assess(
     }
 
     try:
-        bedrock_result = assess_wound(assessment_image, patient_context)
+        bedrock_result = assess_wound(assessment_image, patient_context, previous_scores=previous_scores or None)
     except ClientError:
         raise HTTPException(status_code=502, detail="AI assessment service error")
     except ValueError as e:
         logger.error("Bedrock response parsing error: %s", str(e))
         raise HTTPException(status_code=502, detail="AI assessment returned invalid data")
 
-    # 6. Build assessment record
+    # 7. Build assessment record
     assessment_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat()
 
@@ -126,15 +140,20 @@ async def upload_and_assess(
         "urgency_level": bedrock_result.get("urgency_level", "low"),
         "summary": bedrock_result.get("summary", ""),
         "recommendations": bedrock_result.get("recommendations", []),
+        "voice_agent_script": bedrock_result.get("voice_agent_script", ""),
         "days_post_op": patient_context["days_post_op"],
         "created_at": now,
     }
 
-    # 7. Store in DynamoDB
+    # 8. Store in DynamoDB
     try:
         put_assessment(_float_to_decimal(assessment))
     except ClientError:
         raise HTTPException(status_code=502, detail="Database error while saving assessment")
+
+    # 9. Alert clinician via SNS if urgency is high
+    if assessment["urgency_level"] == "high":
+        publish_urgency_alert(patient, assessment)
 
     return assessment
 

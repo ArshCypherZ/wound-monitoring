@@ -7,21 +7,59 @@
 ## Architecture Overview
 
 ```
-┌─────────────────────────┐     ┌──────────────────────────────────────────────┐
-│   Frontend (React/Vite) │────▶│          Backend (FastAPI)                    │
-│   :5173                 │     │          :8000                                │
-│                         │     │                                              │
-│  PatientHome            │     │  /api/patients    → DynamoDB (patients)      │
-│  PhotoUpload            │     │  /api/assessments → S3 + YOLO + Bedrock     │
-│  HealingTimeline        │     │  /api/voice       → ElevenLabs (stubbed)    │
-│  Dashboard              │     │  /api/health      → health check            │
-└─────────────────────────┘     └──────────────────────────────────────────────┘
-                                         │           │            │
-                                    ┌────┘     ┌─────┘      ┌─────┘
-                                    ▼          ▼            ▼
-                               DynamoDB    Amazon S3    Amazon Bedrock
-                              (patients,  (wound-photos) (Claude vision)
-                              assessments)
+┌─────────────────────────┐     ┌──────────────────────────────────────────────────┐
+│   Frontend (React/Vite) │────▶│            Backend (FastAPI)                      │
+│   :5173                 │     │            :8000                                  │
+│                         │     │                                                  │
+│  PatientHome            │     │  /api/patients    → DynamoDB (patients)          │
+│  PhotoUpload            │     │  /api/assessments → S3 + YOLO + Bedrock + SNS   │
+│  HealingTimeline        │     │  /api/voice       → ElevenLabs (voice calls)    │
+│  Dashboard              │     │  /api/health      → health check                │
+└─────────────────────────┘     └──────────────────────────────────────────────────┘
+                                     │         │          │          │          │
+                                ┌────┘    ┌────┘    ┌─────┘    ┌─────┘    ┌────┘
+                                ▼         ▼         ▼          ▼          ▼
+                           DynamoDB   Amazon S3  Bedrock   Amazon SNS  ElevenLabs
+                          (patients, (wound-     (Claude   (clinician  (outbound
+                          assessments) photos)   vision)    alerts)    voice calls)
+```
+
+### Assessment Pipeline & Voice Call Flow
+
+```mermaid
+sequenceDiagram
+    participant App as Patient App
+    participant API as FastAPI
+    participant S3 as Amazon S3
+    participant YOLO as YOLOv8
+    participant DB as DynamoDB
+    participant AI as Bedrock Claude
+    participant SNS as Amazon SNS
+    participant Voice as ElevenLabs
+
+    rect rgb(40, 40, 60)
+    Note over App, SNS: Wound Assessment Pipeline
+    App->>API: POST /api/assessments/upload (photo + patient_id)
+    API->>S3: Store wound photo
+    API->>YOLO: Detect wound + crop best bounding box
+    API->>DB: Fetch previous 5 assessments (score history)
+    API->>AI: Cropped image + patient context + previous scores
+    AI-->>API: healing_score, tissue_types, anomalies, urgency, voice_agent_script
+    API->>DB: Store full assessment (incl. voice_agent_script)
+    opt urgency_level == "high"
+        API->>SNS: Publish clinician alert (patient details + anomalies)
+    end
+    API-->>App: AssessmentResult JSON
+    end
+
+    rect rgb(40, 60, 40)
+    Note over App, Voice: Voice Agent Flow
+    App->>API: POST /api/voice/call (patient_id)
+    API->>DB: Get patient (incl. language_preference) + latest assessment
+    Note right of API: Use Bedrock voice_agent_script if available, else build fallback
+    API->>Voice: Outbound call (script + language + dynamic variables)
+    Voice-->>App: Patient receives phone call in their language
+    end
 ```
 
 ---
@@ -43,16 +81,19 @@
 
 Uses `pydantic-settings` to load from `.env`:
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | AWS credentials |
-| `AWS_REGION` | `ap-south-1` | AWS region (Mumbai) |
-| `S3_BUCKET_NAME` | `wound-photos` | S3 bucket for images |
-| `DYNAMODB_PATIENTS_TABLE` | `patients` | DynamoDB table name |
-| `DYNAMODB_ASSESSMENTS_TABLE` | `assessments` | DynamoDB table name |
-| `BEDROCK_MODEL_ID` | `anthropic.claude-sonnet-4-5-20250929-v1:0` | Bedrock model |
-| `YOLO_MODEL_PATH` | `yolov8n.pt` | Path to YOLO weights |
-| `CORS_ORIGINS` | `http://localhost:5173` | Allowed origins |
+| Variable                                      | Default                                     | Purpose                                    |
+| --------------------------------------------- | ------------------------------------------- | ------------------------------------------ |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | —                                           | AWS credentials                            |
+| `AWS_REGION`                                  | `ap-south-1`                                | AWS region (Mumbai)                        |
+| `S3_BUCKET_NAME`                              | `wound-photos`                              | S3 bucket for images                       |
+| `DYNAMODB_PATIENTS_TABLE`                     | `patients`                                  | DynamoDB table name                        |
+| `DYNAMODB_ASSESSMENTS_TABLE`                  | `assessments`                               | DynamoDB table name                        |
+| `BEDROCK_MODEL_ID`                            | `anthropic.claude-sonnet-4-5-20250929-v1:0` | Bedrock model                              |
+| `YOLO_MODEL_PATH`                             | `yolov8n.pt`                                | Path to YOLO weights                       |
+| `ELEVENLABS_API_KEY`                          | —                                           | ElevenLabs API key for voice calls         |
+| `ELEVENLABS_AGENT_ID`                         | —                                           | ElevenLabs Conversational AI agent ID      |
+| `SNS_ALERT_TOPIC_ARN`                         | —                                           | SNS topic ARN for clinician urgency alerts |
+| `CORS_ORIGINS`                                | `http://localhost:5173`                     | Allowed origins                            |
 
 ---
 
@@ -60,26 +101,26 @@ Uses `pydantic-settings` to load from `.env`:
 
 #### Patient schemas
 
-| Schema | Fields | Usage |
-|---|---|---|
-| `PatientCreate` | name, age, gender, phone, surgery_type, surgery_date, wound_location, risk_factors, language_preference | Request body for `POST /api/patients` |
-| `Patient` | All of above + `patient_id`, `created_at` | Response model |
-| `PatientUpdate` | All fields optional | Request body for `PUT /api/patients/{id}` |
+| Schema          | Fields                                                                                                  | Usage                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `PatientCreate` | name, age, gender, phone, surgery_type, surgery_date, wound_location, risk_factors, language_preference | Request body for `POST /api/patients`     |
+| `Patient`       | All of above + `patient_id`, `created_at`                                                               | Response model                            |
+| `PatientUpdate` | All fields optional                                                                                     | Request body for `PUT /api/patients/{id}` |
 
 #### Assessment schemas
 
-| Schema | Fields | Usage |
-|---|---|---|
-| `BoundingBox` | xmin, ymin, xmax, ymax, confidence, label | YOLO detection output |
-| `YoloResult` | detections[], has_wound | Aggregated YOLO output |
-| `PWATScores` | 8 sub-scores (size, depth, necrotic tissue, granulation, edges, skin viability) + total | Wound scoring rubric (max 32) |
-| `AssessmentResult` | assessment_id, patient_id, image_url, yolo_detections, healing_score (0-10), pwat_scores, infection_status, tissue_types, anomalies, urgency_level, summary, recommendations, days_post_op, created_at | Full assessment response |
+| Schema             | Fields                                                                                                                                                                                                                     | Usage                         |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `BoundingBox`      | xmin, ymin, xmax, ymax, confidence, label                                                                                                                                                                                  | YOLO detection output         |
+| `YoloResult`       | detections[], has_wound                                                                                                                                                                                                    | Aggregated YOLO output        |
+| `PWATScores`       | 8 sub-scores (size, depth, necrotic tissue, granulation, edges, skin viability) + total                                                                                                                                    | Wound scoring rubric (max 32) |
+| `AssessmentResult` | assessment_id, patient_id, image_url, yolo_detections, healing_score (0-10), pwat_scores, infection_status, tissue_types, anomalies, urgency_level, summary, recommendations, voice_agent_script, days_post_op, created_at | Full assessment response      |
 
 #### Voice schemas
 
-| Schema | Fields | Usage |
-|---|---|---|
-| `VoiceCallRequest` | patient_id | Request body |
+| Schema              | Fields                                       | Usage                      |
+| ------------------- | -------------------------------------------- | -------------------------- |
+| `VoiceCallRequest`  | patient_id                                   | Request body               |
 | `VoiceCallResponse` | conversation_id, patient_id, status, message | Response with voice script |
 
 ---
@@ -88,22 +129,22 @@ Uses `pydantic-settings` to load from `.env`:
 
 #### `routers/patients.py` — Patient CRUD
 
-| Method | Path | What it does |
-|---|---|---|
-| `POST` | `/api/patients` | Creates patient with UUID, stores in DynamoDB |
-| `GET` | `/api/patients` | Lists all patients (DynamoDB scan) |
-| `GET` | `/api/patients/{id}` | Gets single patient, 404 if missing |
-| `PUT` | `/api/patients/{id}` | Partial update (only non-null fields via `exclude_none`) |
-| `DELETE` | `/api/patients/{id}` | Deletes patient, 404 if missing |
+| Method   | Path                 | What it does                                             |
+| -------- | -------------------- | -------------------------------------------------------- |
+| `POST`   | `/api/patients`      | Creates patient with UUID, stores in DynamoDB            |
+| `GET`    | `/api/patients`      | Lists all patients (DynamoDB scan)                       |
+| `GET`    | `/api/patients/{id}` | Gets single patient, 404 if missing                      |
+| `PUT`    | `/api/patients/{id}` | Partial update (only non-null fields via `exclude_none`) |
+| `DELETE` | `/api/patients/{id}` | Deletes patient, 404 if missing                          |
 
 #### `routers/assessments.py` — Wound Assessment Pipeline
 
-| Method | Path | What it does |
-|---|---|---|
-| `POST` | `/api/assessments/upload` | **Full pipeline** (see below) |
-| `GET` | `/api/assessments/{patient_id}` | Lists all assessments for a patient, sorted by date desc |
-| `GET` | `/api/assessments/detail/{id}` | Gets single assessment |
-| `DELETE` | `/api/assessments/detail/{id}` | Deletes assessment |
+| Method   | Path                            | What it does                                             |
+| -------- | ------------------------------- | -------------------------------------------------------- |
+| `POST`   | `/api/assessments/upload`       | **Full pipeline** (see below)                            |
+| `GET`    | `/api/assessments/{patient_id}` | Lists all assessments for a patient, sorted by date desc |
+| `GET`    | `/api/assessments/detail/{id}`  | Gets single assessment                                   |
+| `DELETE` | `/api/assessments/detail/{id}`  | Deletes assessment                                       |
 
 **Upload pipeline (`POST /upload`):**
 
@@ -113,20 +154,23 @@ Uses `pydantic-settings` to load from `.env`:
 3. Upload original image to S3 (wounds/{patient_id}/{filename})
 4. Generate presigned URL for the image
 5. Run YOLO detection → get bounding boxes + cropped image
-6. Build patient context (age, surgery date, days post-op, risk factors)
-7. Send cropped image + context to Bedrock Claude → get structured assessment
-8. Build assessment record with all results
-9. Convert floats to Decimals (DynamoDB requirement)
-10. Store in DynamoDB → return AssessmentResult
+6. Fetch up to 5 previous assessments for trend context (score history)
+7. Build patient context (age, surgery date, days post-op, risk factors)
+8. Send cropped image + context + previous scores to Bedrock Claude → get structured assessment
+9. Build assessment record (incl. voice_agent_script from Bedrock)
+10. Convert floats to Decimals (DynamoDB requirement)
+11. Store in DynamoDB
+12. If urgency_level == "high" → publish clinician alert via SNS
+13. Return AssessmentResult
 ```
 
 Includes `Decimal↔float` converters since DynamoDB returns `Decimal` objects that break JSON serialization.
 
 #### `routers/voice.py` — Voice Agent
 
-| Method | Path | What it does |
-|---|---|---|
-| `POST` | `/api/voice/call` | Fetches patient + latest assessment, builds conversational script, and **triggers a live outbound phone call** via the ElevenLabs Conversational AI API (`POST /v1/convai/agents/{agent_id}/calls`). Uses the generated script as the `system_prompt_override`. Falls back to a simulated response if API keys are missing. |
+| Method | Path              | What it does                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST` | `/api/voice/call` | Fetches patient + latest assessment. Uses the **Bedrock-generated `voice_agent_script`** stored in the assessment (falling back to a manually built script if absent). Passes the patient's `language_preference` to ElevenLabs. Triggers a live outbound phone call via the ElevenLabs Conversational AI API (`POST /v1/convai/agents/{agent_id}/calls`). Falls back to a simulated response if API keys are missing. |
 
 ---
 
@@ -157,10 +201,18 @@ Functions: `put_patient`, `get_patient`, `get_all_patients`, `update_patient`, `
 
 #### `services/bedrock.py`
 
-- `assess_wound(image_bytes, patient_context)` → calls Claude via `bedrock-runtime`
+- `assess_wound(image_bytes, patient_context, previous_scores=None)` → calls Claude via `bedrock-runtime`
 - **System prompt** constrains output to exact JSON schema (healing_score, pwat_scores, tissue_types, anomalies, urgency_level, summary, recommendations, voice_agent_script)
 - Sends multimodal message: base64-encoded image + text with patient context
+- When `previous_scores` is provided, appends the last 5 healing scores with day numbers to the prompt for trend-aware analysis
 - Strips accidental markdown fencing from response before JSON parsing
+
+#### `services/sns.py`
+
+- `publish_urgency_alert(patient, assessment)` → publishes a structured JSON message to an SNS topic when urgency is high
+- Includes patient name, phone, surgery type, wound location, healing score, anomalies, and summary
+- **Graceful degradation:** skips silently if `SNS_ALERT_TOPIC_ARN` is not configured; logs error but does not block the pipeline on publish failure
+- Lazy-initialised boto3 SNS client (same pattern as S3 and DynamoDB services)
 
 ### Utils — `utils/helpers.py`
 
@@ -171,15 +223,15 @@ Functions: `put_patient`, `get_patient`, `get_all_patients`, `update_patient`, `
 
 ### Error Handling Strategy
 
-| Layer | Exception | HTTP Code | Meaning |
-|---|---|---|---|
-| Services | `ClientError` | — | Logged with context, re-raised to router |
-| Services | `ValueError` | — | Bad input (invalid image, bad JSON from Bedrock) |
-| Services | `RuntimeError` | — | Service failure (YOLO model won't load) |
-| Routers | `ClientError` | **502** | Upstream AWS service error |
-| Routers | `ValueError` | **400** | Bad request (invalid image, empty file) |
-| Routers | `RuntimeError` | **503** | Service unavailable (YOLO down) |
-| Routers | Not found | **404** | Patient or assessment doesn't exist |
+| Layer    | Exception      | HTTP Code | Meaning                                          |
+| -------- | -------------- | --------- | ------------------------------------------------ |
+| Services | `ClientError`  | —         | Logged with context, re-raised to router         |
+| Services | `ValueError`   | —         | Bad input (invalid image, bad JSON from Bedrock) |
+| Services | `RuntimeError` | —         | Service failure (YOLO model won't load)          |
+| Routers  | `ClientError`  | **502**   | Upstream AWS service error                       |
+| Routers  | `ValueError`   | **400**   | Bad request (invalid image, empty file)          |
+| Routers  | `RuntimeError` | **503**   | Service unavailable (YOLO down)                  |
+| Routers  | Not found      | **404**   | Patient or assessment doesn't exist              |
 
 ---
 
@@ -191,12 +243,12 @@ Functions: `put_patient`, `get_patient`, `get_all_patients`, `update_patient`, `
 
 All routes wrapped in `Layout` (provides bottom nav bar):
 
-| Route | Component | Purpose |
-|---|---|---|
-| `/` | `PatientHome` | Patient landing page |
-| `/upload` | `PhotoUpload` | Camera/file upload for wound photos |
-| `/timeline` | `HealingTimeline` | Visual history of healing progress |
-| `/dashboard` | `Dashboard` | Clinician overview of all patients |
+| Route        | Component         | Purpose                             |
+| ------------ | ----------------- | ----------------------------------- |
+| `/`          | `PatientHome`     | Patient landing page                |
+| `/upload`    | `PhotoUpload`     | Camera/file upload for wound photos |
+| `/timeline`  | `HealingTimeline` | Visual history of healing progress  |
+| `/dashboard` | `Dashboard`       | Clinician overview of all patients  |
 
 ### Layout — `components/Layout.jsx`
 
@@ -209,17 +261,17 @@ All routes wrapped in `Layout` (provides bottom nav bar):
 
 Axios instance with `baseURL: '/api'` and 30s timeout:
 
-| Function | Endpoint | Notes |
-|---|---|---|
-| `createPatient(data)` | `POST /patients` | |
-| `getPatients()` | `GET /patients` | |
-| `getPatient(id)` | `GET /patients/{id}` | |
-| `updatePatient(id, data)` | `PUT /patients/{id}` | |
-| `uploadWoundPhoto(patientId, file)` | `POST /assessments/upload` | Uses `multipart/form-data` |
-| `getAssessments(patientId)` | `GET /assessments/{patientId}` | |
-| `getAssessment(id)` | `GET /assessments/detail/{id}` | |
-| `triggerVoiceCall(patientId)` | `POST /voice/call` | |
-| `healthCheck()` | `GET /health` | |
+| Function                            | Endpoint                       | Notes                      |
+| ----------------------------------- | ------------------------------ | -------------------------- |
+| `createPatient(data)`               | `POST /patients`               |                            |
+| `getPatients()`                     | `GET /patients`                |                            |
+| `getPatient(id)`                    | `GET /patients/{id}`           |                            |
+| `updatePatient(id, data)`           | `PUT /patients/{id}`           |                            |
+| `uploadWoundPhoto(patientId, file)` | `POST /assessments/upload`     | Uses `multipart/form-data` |
+| `getAssessments(patientId)`         | `GET /assessments/{patientId}` |                            |
+| `getAssessment(id)`                 | `GET /assessments/detail/{id}` |                            |
+| `triggerVoiceCall(patientId)`       | `POST /voice/call`             |                            |
+| `healthCheck()`                     | `GET /health`                  |                            |
 
 ### Vite Config — `vite.config.js`
 
@@ -229,12 +281,14 @@ Proxies `/api` requests to `http://localhost:8000` during development to avoid C
 
 ## AWS Resources Required
 
-| Service | Resource | Config |
-|---|---|---|
-| **S3** | Bucket: `wound-photos` | Stores wound images under `wounds/{patient_id}/` |
-| **DynamoDB** | Table: `patients` (PK: `patient_id`) | Patient records |
-| **DynamoDB** | Table: `assessments` (PK: `assessment_id`) | Assessment results |
-| **Bedrock** | Model: Claude Sonnet | Multimodal wound assessment |
+| Service        | Resource                                   | Config                                           |
+| -------------- | ------------------------------------------ | ------------------------------------------------ |
+| **S3**         | Bucket: `wound-photos`                     | Stores wound images under `wounds/{patient_id}/` |
+| **DynamoDB**   | Table: `patients` (PK: `patient_id`)       | Patient records                                  |
+| **DynamoDB**   | Table: `assessments` (PK: `assessment_id`) | Assessment results                               |
+| **Bedrock**    | Model: Claude Sonnet                       | Multimodal wound assessment                      |
+| **SNS**        | Topic: `wound-urgency-alerts`              | Clinician alerts on high-urgency assessments     |
+| **ElevenLabs** | Conversational AI Agent                    | Voice call platform (outbound calls to patients) |
 
 > **Note:** For production, add a Global Secondary Index on `patient_id` in the assessments table to replace the current scan+filter approach.
 
