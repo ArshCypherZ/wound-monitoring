@@ -45,10 +45,18 @@ export default function DashboardPage() {
     queryFn: getPatients,
   });
 
-  // We could fetch latest assessments here, but for simplicity of the MVP dashboard list,
-  // we'll primarily rely on the patient data. We will mock the "urgency" and "healing score"
-  // on the dashboard list if it's not directly on the patient model, or we can fetch it.
-  // Given hackathon time constraints, we'll lean on robust UI and fast patient fetching.
+  // Fetch latest assessments for all patients to derive "Attention Needed" count
+  const { data: allAssessments, isLoading: isAssessmentsLoading } = useQuery({
+    queryKey: ["all-assessments", patients?.map((p) => p.patient_id)],
+    queryFn: async () => {
+      if (!patients) return [];
+      const results = await Promise.all(
+        patients.map((p) => getAssessments(p.patient_id).catch(() => [])),
+      );
+      return results;
+    },
+    enabled: !!patients && patients.length > 0,
+  });
 
   const filteredPatients =
     patients?.filter(
@@ -59,7 +67,12 @@ export default function DashboardPage() {
 
   // Derived stats
   const totalPatients = patients?.length || 0;
-  const attentionNeeded = 2; // Mocked for highlight, normally derived from assessments
+  const attentionNeeded = allAssessments
+    ? allAssessments.filter(
+        (assessments) =>
+          assessments.length > 0 && assessments[0].urgency_level === "high",
+      ).length
+    : 0;
 
   return (
     <div className="flex flex-col gap-8">
@@ -105,7 +118,11 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-destructive">
-              {isLoading ? <Skeleton className="h-8 w-12" /> : attentionNeeded}
+              {isLoading || isAssessmentsLoading ? (
+                <Skeleton className="h-8 w-12" />
+              ) : (
+                attentionNeeded
+              )}
             </div>
           </CardContent>
         </Card>
