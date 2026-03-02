@@ -29,8 +29,9 @@ import {
 } from "@/components/ui/tooltip";
 import { Activity, AlertTriangle, Search, UserPlus, Users } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { formatDistanceToNow } from "date-fns";
+import { AssessmentResult } from "@/lib/types";
 
 export default function DashboardPage() {
   const [search, setSearch] = useState("");
@@ -73,6 +74,28 @@ export default function DashboardPage() {
           assessments.length > 0 && assessments[0].urgency_level === "high",
       ).length
     : 0;
+
+  // Build a map: patient_id -> latest urgency level
+  const urgencyByPatient = useMemo(() => {
+    const map: Record<string, string> = {};
+    if (patients && allAssessments) {
+      patients.forEach((p, idx) => {
+        const assessments = allAssessments[idx];
+        if (assessments && assessments.length > 0) {
+          map[p.patient_id] = assessments[0].urgency_level;
+        }
+      });
+    }
+    return map;
+  }, [patients, allAssessments]);
+
+  const getStatusColor = (patientId: string) => {
+    const urgency = urgencyByPatient[patientId];
+    if (urgency === "high") return "bg-red-500";
+    if (urgency === "medium") return "bg-yellow-500";
+    if (urgency === "low") return "bg-green-500";
+    return "bg-muted-foreground/30"; // no assessment yet
+  };
 
   return (
     <div className="flex flex-col gap-8">
@@ -235,7 +258,9 @@ export default function DashboardPage() {
                   filteredPatients.map((patient) => (
                     <TableRow key={patient.patient_id}>
                       <TableCell>
-                        <div className="h-3 w-3 rounded-full bg-green-500" />
+                        <div
+                          className={`h-3 w-3 rounded-full ${getStatusColor(patient.patient_id)}`}
+                        />
                       </TableCell>
                       <TableCell className="font-medium">
                         {patient.name}
