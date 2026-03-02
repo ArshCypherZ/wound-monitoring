@@ -69,13 +69,13 @@ export default function PatientTimelinePage() {
 
       <div className="flex flex-col gap-2">
         <h1 className="text-3xl font-bold tracking-tight">Recovery Timeline</h1>
-        <p className="text-muted-foreground">
+        <div className="text-muted-foreground">
           {isPatientLoading ? (
             <Skeleton className="h-5 w-48" />
           ) : (
             `Healing progress and assessment history for ${patient?.name}`
           )}
-        </p>
+        </div>
       </div>
 
       {assessments && assessments.length > 0 ? (
@@ -173,6 +173,11 @@ export default function PatientTimelinePage() {
                       </CardTitle>
                       <CardDescription className="mt-1">
                         Healing Score: {assessment.healing_score}/10
+                        {assessment.days_post_op != null && (
+                          <span className="ml-2 text-muted-foreground">
+                            (Day {assessment.days_post_op} post-op)
+                          </span>
+                        )}
                       </CardDescription>
                     </div>
                     <Badge
@@ -189,6 +194,18 @@ export default function PatientTimelinePage() {
                     </Badge>
                   </CardHeader>
                   <CardContent className="pb-4">
+                    {/* Wound Image */}
+                    {assessment.image_url && (
+                      <div className="mb-4 rounded-lg overflow-hidden border border-border bg-black/5 flex items-center justify-center">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={assessment.image_url}
+                          alt={`Wound assessment from ${format(new Date(assessment.created_at), "MMM d, yyyy")}`}
+                          className="max-h-48 object-contain"
+                        />
+                      </div>
+                    )}
+
                     <p className="text-sm text-foreground/80 leading-relaxed mb-4">
                       {assessment.summary}
                     </p>

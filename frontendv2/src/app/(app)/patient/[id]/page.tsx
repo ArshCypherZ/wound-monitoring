@@ -3,7 +3,7 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { getPatient, getAssessments, triggerVoiceCall } from "@/lib/api";
 import { useParams } from "next/navigation";
-import Link from "next/navigation";
+import Link from "next/link";
 import { formatDistanceToNow, format } from "date-fns";
 import {
   AlertCircle,
@@ -13,6 +13,9 @@ import {
   Activity,
   Clock,
   AlertTriangle,
+  CheckCircle2,
+  ListChecks,
+  Image as ImageIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -249,15 +252,40 @@ export default function PatientHomePage() {
                     <Skeleton className="h-6 w-16" />
                   </div>
                 </div>
-              ) : latestAssessment ? (
+              )               : latestAssessment ? (
                 <div className="space-y-6">
-                  {/* Healing Score */}
+                  {/* Wound Image */}
+                  {latestAssessment.image_url && (
+                    <div className="space-y-2">
+                      <span className="text-sm font-medium flex items-center gap-2">
+                        <ImageIcon className="h-4 w-4" />
+                        Wound Photo
+                      </span>
+                      <div className="rounded-lg overflow-hidden border border-border bg-black/5 flex items-center justify-center">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={latestAssessment.image_url}
+                          alt="Latest wound assessment"
+                          className="max-h-64 object-contain"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Healing Score + Days Post-Op */}
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium">Healing Score</span>
-                      <span className="font-bold">
-                        {latestAssessment.healing_score}/10
-                      </span>
+                      <div className="flex items-center gap-3">
+                        {latestAssessment.days_post_op != null && (
+                          <span className="text-xs text-muted-foreground">
+                            Day {latestAssessment.days_post_op} post-op
+                          </span>
+                        )}
+                        <span className="font-bold">
+                          {latestAssessment.healing_score}/10
+                        </span>
+                      </div>
                     </div>
                     {/* Linear mapping 0-10 -> 0-100 */}
                     <Progress
@@ -277,12 +305,11 @@ export default function PatientHomePage() {
                       </span>
                       <Badge
                         variant={
-                          latestAssessment.infection_status ===
-                          "Signs of infection present"
+                          latestAssessment.infection_status !== "none"
                             ? "destructive"
                             : "outline"
                         }
-                        className="font-normal"
+                        className="font-normal capitalize"
                       >
                         {latestAssessment.infection_status || "Unknown"}
                       </Badge>
@@ -322,6 +349,62 @@ export default function PatientHomePage() {
                         </AlertDescription>
                       </Alert>
                     )}
+
+                  {/* Recommendations */}
+                  {latestAssessment.recommendations &&
+                    latestAssessment.recommendations.length > 0 && (
+                      <div className="space-y-3">
+                        <span className="text-sm font-medium flex items-center gap-2">
+                          <ListChecks className="h-4 w-4" />
+                          Recommendations
+                        </span>
+                        <ul className="space-y-2">
+                          {latestAssessment.recommendations.map((rec, i) => (
+                            <li
+                              key={i}
+                              className="text-sm flex items-start gap-2"
+                            >
+                              <CheckCircle2 className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+                              <span>{rec}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                  {/* PWAT Scores */}
+                  {latestAssessment.pwat_scores && (
+                    <div className="space-y-3">
+                      <span className="text-sm font-medium">
+                        PWAT Scores (Total:{" "}
+                        {latestAssessment.pwat_scores.total_score ?? "N/A"}/32)
+                      </span>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                        {[
+                          { label: "Size", value: latestAssessment.pwat_scores.size, max: 4 },
+                          { label: "Depth", value: latestAssessment.pwat_scores.depth, max: 4 },
+                          { label: "Necrotic Tissue Type", value: latestAssessment.pwat_scores.necrotic_tissue_type, max: 4 },
+                          { label: "Necrotic Tissue Amount", value: latestAssessment.pwat_scores.necrotic_tissue_amount, max: 4 },
+                          { label: "Granulation Type", value: latestAssessment.pwat_scores.granulation_tissue_type, max: 4 },
+                          { label: "Granulation Amount", value: latestAssessment.pwat_scores.granulation_tissue_amount, max: 4 },
+                          { label: "Edges", value: latestAssessment.pwat_scores.edges, max: 4 },
+                          { label: "Periulcer Skin", value: latestAssessment.pwat_scores.periulcer_skin_viability, max: 2 },
+                        ].map((item) => (
+                          <div
+                            key={item.label}
+                            className="flex items-center justify-between"
+                          >
+                            <span className="text-muted-foreground">
+                              {item.label}
+                            </span>
+                            <span className="font-medium">
+                              {item.value}/{item.max}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center py-8 text-center border-2 border-dashed rounded-lg border-muted">
