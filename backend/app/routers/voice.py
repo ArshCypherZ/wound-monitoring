@@ -90,21 +90,10 @@ async def trigger_voice_call(data: VoiceCallRequest):
         "agent_phone_number_id": settings.elevenlabs_agent_phone_number_id,
         "to_number": formatted_phone,
         "conversation_initiation_client_data": {
-            "conversation_config_override": {
-                "agent": {
-                    "prompt": {
-                        "prompt": (
-                            f"You are a medical assistant calling a patient post-surgery. "
-                            f"Speak in the language matching locale '{language}'. "
-                            f"Your script/goal for this call is: {script}"
-                        ),
-                    },
-                    "first_message": f"Hi {patient.get('name', 'there')}, this is your wound care assistant.",
-                    "language": language,
-                },
-            },
             "dynamic_data": {
                 "patient_name": patient.get("name", "there"),
+                "language": language,
+                "script": script,
                 "healing_score": str(latest.get("healing_score", "N/A"))
                 if latest
                 else "N/A",
